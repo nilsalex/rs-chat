@@ -3,24 +3,15 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
-async fn chat(stream1: &mut TcpStream, stream2: &mut TcpStream) -> std::io::Result<()> {
+async fn chat(mut stream1: TcpStream, mut stream2: TcpStream) -> std::io::Result<()> {
+    let addr1 = stream1.peer_addr()?;
+    let addr2 = stream2.peer_addr()?;
+
     stream1
-        .write(
-            format!(
-                "Hi, you're chatting with {}.\n",
-                stream2.peer_addr().unwrap()
-            )
-            .as_bytes(),
-        )
+        .write_all(format!("Hi, you're chatting with {}.\n", addr2).as_bytes())
         .await?;
     stream2
-        .write(
-            format!(
-                "Hi, you're chatting with {}.\n",
-                stream1.peer_addr().unwrap()
-            )
-            .as_bytes(),
-        )
+        .write_all(format!("Hi, you're chatting with {}.\n", addr1).as_bytes())
         .await?;
 
     let mut buffer1 = [0; 1024];
@@ -32,27 +23,33 @@ async fn chat(stream1: &mut TcpStream, stream2: &mut TcpStream) -> std::io::Resu
 
         tokio::select! {
             n = future1 => {
-                if let Ok(n) = n {
-                    stream2.write(&buffer1[0..n]).await?;
+                match n {
+                    Ok(0) => {break;}
+                    Ok(n) => {stream2.write_all(&buffer1[0..n]).await?;}
+                    _     => {break;}
                 }
             },
             n = future2 => {
-                if let Ok(n) = n {
-                    stream1.write(&buffer2[0..n]).await?;
+                match n {
+                    Ok(0) => {break;}
+                    Ok(n) => {stream1.write_all(&buffer2[0..n]).await?;}
+                    _     => {break;}
                 }
             },
         }
     }
+
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("0.0.0.0:8080").await?;
 
-    let (mut socket1, _) = listener.accept().await?;
-    let (mut socket2, _) = listener.accept().await?;
+    loop {
+        let (socket1, _) = listener.accept().await?;
+        let (socket2, _) = listener.accept().await?;
 
-    chat(&mut socket1, &mut socket2).await?;
-
-    Ok(())
+        tokio::spawn(async move { chat(socket1, socket2).await });
+    }
 }
