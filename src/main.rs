@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -46,10 +48,23 @@ async fn chat(mut stream1: TcpStream, mut stream2: TcpStream) -> std::io::Result
 async fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("0.0.0.0:8080").await?;
 
-    loop {
-        let (socket1, _) = listener.accept().await?;
-        let (socket2, _) = listener.accept().await?;
+    let max_connections = 2;
+    let semaphore = Arc::new(Semaphore::new(max_connections));
 
-        tokio::spawn(async move { chat(socket1, socket2).await });
+    loop {
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+
+        let (stream1, address1) = listener.accept().await?;
+        let (stream2, address2) = listener.accept().await?;
+
+        println!(
+            "New connections from {} and {}. Starting chat!",
+            &address1, &address2
+        );
+
+        tokio::spawn(async move {
+            let _p = permit;
+            chat(stream1, stream2).await
+        });
     }
 }
