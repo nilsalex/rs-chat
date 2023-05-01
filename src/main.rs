@@ -1,51 +1,69 @@
+use futures::{SinkExt, StreamExt};
+use std::error::Error;
 use std::sync::Arc;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-};
+use tokio_tungstenite::WebSocketStream;
+use tungstenite::Message;
 
-async fn chat(mut stream1: TcpStream, mut stream2: TcpStream) -> std::io::Result<()> {
-    let addr1 = stream1.peer_addr()?;
-    let addr2 = stream2.peer_addr()?;
+async fn chat(
+    stream1: WebSocketStream<TcpStream>,
+    stream2: WebSocketStream<TcpStream>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let addr1 = stream1.get_ref().peer_addr()?;
+    let addr2 = stream2.get_ref().peer_addr()?;
 
-    stream1
-        .write_all(format!("Hi, you're chatting with {}.\n", addr2).as_bytes())
+    let (mut sender1, mut receiver1) = stream1.split();
+    let (mut sender2, mut receiver2) = stream2.split();
+
+    sender1
+        .send(Message::Text(format!(
+            "Hi, you're chatting with {}.\n",
+            addr2
+        )))
         .await?;
-    stream2
-        .write_all(format!("Hi, you're chatting with {}.\n", addr1).as_bytes())
-        .await?;
 
-    let mut buffer1 = [0; 1024];
-    let mut buffer2 = [0; 1024];
+    sender2
+        .send(Message::Text(format!(
+            "Hi, you're chatting with {}.\n",
+            addr1
+        )))
+        .await?;
 
     loop {
-        let future1 = stream1.read(&mut buffer1);
-        let future2 = stream2.read(&mut buffer2);
-
         tokio::select! {
-            n = future1 => {
-                match n {
-                    Ok(0) => {break;}
-                    Ok(n) => {stream2.write_all(&buffer1[0..n]).await?;}
-                    _     => {break;}
+            item = receiver1.next() => {
+                if let Some(msg_result) = item {
+                    match msg_result {
+                        Ok(msg) => sender2.send(msg).await?,
+                        Err(err) => println!("{:?}", err)
+                    }
+                } else {
+                    sender2.close().await?;
+                    break
                 }
             },
-            n = future2 => {
-                match n {
-                    Ok(0) => {break;}
-                    Ok(n) => {stream1.write_all(&buffer2[0..n]).await?;}
-                    _     => {break;}
+            item = receiver2.next() => {
+                if let Some(msg_result) = item {
+                    match msg_result {
+                        Ok(msg) => sender1.send(msg).await?,
+                        Err(err) => println!("{:?}", err)
+                    }
+                } else {
+                    sender1.close().await?;
+                    break
                 }
             },
         }
     }
 
+    println!("connection closed");
+
     Ok(())
 }
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind("0.0.0.0:8080").await?;
 
     let max_connections = 2;
@@ -55,7 +73,9 @@ async fn main() -> std::io::Result<()> {
         let permit = semaphore.clone().acquire_owned().await.unwrap();
 
         let (stream1, address1) = listener.accept().await?;
+        let ws_stream1 = tokio_tungstenite::accept_async(stream1).await?;
         let (stream2, address2) = listener.accept().await?;
+        let ws_stream2 = tokio_tungstenite::accept_async(stream2).await?;
 
         println!(
             "New connections from {} and {}. Starting chat!",
@@ -64,7 +84,7 @@ async fn main() -> std::io::Result<()> {
 
         tokio::spawn(async move {
             let _p = permit;
-            chat(stream1, stream2).await
+            chat(ws_stream1, ws_stream2).await
         });
     }
 }
